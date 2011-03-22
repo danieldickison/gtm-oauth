@@ -99,6 +99,7 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
 @synthesize privateKey = privateKey_;
 @synthesize shouldUseParamsToAuthorize = shouldUseParamsToAuthorize_;
 @synthesize userData = userData_;
+@synthesize timestampOffset = timestampOffset_;
 
 // create an authentication object, with hardcoded values for installed apps
 // of HMAC-SHA1 as signature method, and "anonymous" as the consumer key and
@@ -864,6 +865,7 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
   if (timestamp_) return timestamp_; // for testing only
   
   NSTimeInterval timeInterval = [[NSDate date] timeIntervalSince1970];
+  timeInterval += timestampOffset_;
   unsigned long long timestampVal = (unsigned long long) timeInterval;
   NSString *timestamp = [NSString stringWithFormat:@"%qu", timestampVal];
   return timestamp;

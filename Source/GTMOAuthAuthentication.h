@@ -79,6 +79,7 @@ _EXTERN NSString* const kGTMOAuthSignatureMethodRSA_SHA1  _INITIALIZE_AS(@"RSA-S
   
   NSString *realm_;
   NSString *privateKey_;
+  NSTimeInterval timestampOffset_;
   NSString *timestamp_; // set for testing only
   NSString *nonce_;     // set for testing only
   
@@ -96,7 +97,8 @@ _EXTERN NSString* const kGTMOAuthSignatureMethodRSA_SHA1  _INITIALIZE_AS(@"RSA-S
 //
 // timestamp (seconds since 1970) and nonce (random number) are generated
 // uniquely for each request, except during testing, when they may be set
-// explicitly
+// explicitly. Use timestampOffset if the server clock differs from the
+// client clock.
 //
 // Note: we're using "assign" for these since they're stored inside
 //       the dictionary of param values rather than retained by ivars.
@@ -115,6 +117,7 @@ _EXTERN NSString* const kGTMOAuthSignatureMethodRSA_SHA1  _INITIALIZE_AS(@"RSA-S
 @property (nonatomic, copy) NSString *verifier;
 @property (nonatomic, copy) NSString *tokenSecret;
 @property (nonatomic, copy) NSString *callbackConfirmed;
+@property (nonatomic, assign) NSTimeInterval timestampOffset;
 @property (nonatomic, copy) NSString *timestamp;
 @property (nonatomic, copy) NSString *nonce;
 
