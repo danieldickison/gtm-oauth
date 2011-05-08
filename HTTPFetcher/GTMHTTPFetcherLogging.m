@@ -62,7 +62,7 @@
 
 + (NSString *)snipSubtringOfString:(NSString *)originalStr
                 betweenStartString:(NSString *)startStr
-                         endString:(NSString *)endStr;  
+                         endString:(NSString *)endStr;
 @end
 
 @implementation GTMHTTPFetcher (GTMHTTPFetcherLogging)
@@ -174,20 +174,15 @@ static NSString* gLoggingProcessName = nil;
 // formattedStringFromData returns a prettyprinted string for XML or JSON input,
 // and a plain string for other input data
 - (NSString *)formattedStringFromData:(NSData *)inputData
-                          contentType:(NSString *)contentType {
+                          contentType:(NSString *)contentType
+                                 JSON:(NSDictionary **)outJSON {
   if (inputData == nil) return nil;
 
   // if the content type is JSON and we have the parsing class available,
   // use that
   if ([contentType hasPrefix:@"application/json"]
       && [inputData length] > 5) {
-#ifdef GTL_TARGET_NAMESPACE
-    NSString *className = [NSString stringWithFormat:@"%s_%s",
-                           GTL_TARGET_NAMESPACE_STRING, "SBJSON"];
-#else
-    NSString *className = @"SBJSON";
-#endif
-    Class jsonClass = NSClassFromString(className);
+    Class jsonClass = NSClassFromString(@"SBJSON");
     if (jsonClass) {
       SBJSON *parser = [[[jsonClass alloc] init] autorelease];
       [parser setHumanReadable:YES];
@@ -195,8 +190,19 @@ static NSString* gLoggingProcessName = nil;
                                                  encoding:NSUTF8StringEncoding] autorelease];
       if (jsonStr) {
         // convert from JSON string to NSObjects and back to a formatted string
-        id obj = [parser objectWithString:jsonStr error:NULL];
+        NSMutableDictionary *obj = [parser objectWithString:jsonStr error:NULL];
         if (obj) {
+          if (outJSON) *outJSON = obj;
+          if ([obj isKindOfClass:[NSMutableDictionary class]]) {
+            // for security and privacy, omit OAuth 2 response refresh tokens
+            //
+            // we'll assume that any JSON with "refresh_token" and "access_token"
+            // keys in the response is an OAuth 2 token endpoint response
+            if ([obj valueForKey:@"refresh_token"] != nil
+                && [obj valueForKey:@"access_token"] != nil) {
+              [obj setObject:@"_snip_" forKey:@"refresh_token"];
+            }
+          }
           NSString *formatted = [parser stringWithObject:obj error:NULL];
           if (formatted) return formatted;
         }
@@ -259,44 +265,6 @@ static NSString* gLoggingProcessName = nil;
   return dataStr;
 }
 
-
-- (NSString *)cleanParameterFollowing:(NSString *)paramName
-                           fromString:(NSString *)originalStr {
-  // We don't want the password written to disk
-  //
-  // find "&Passwd=" in the string, and replace it and the stuff that
-  // follows it with "Passwd=_snip_"
-
-  NSRange passwdRange = [originalStr rangeOfString:@"&Passwd="];
-  if (passwdRange.location != NSNotFound) {
-
-    // we found Passwd=; find the & that follows the parameter
-    NSUInteger origLength = [originalStr length];
-    NSRange restOfString = NSMakeRange(passwdRange.location+1,
-                                       origLength - passwdRange.location - 1);
-    NSRange rangeOfFollowingAmp = [originalStr rangeOfString:@"&"
-                                                     options:0
-                                                       range:restOfString];
-    NSRange replaceRange;
-    if (rangeOfFollowingAmp.location == NSNotFound) {
-      // found no other & so replace to end of string
-      replaceRange = NSMakeRange(passwdRange.location,
-                           rangeOfFollowingAmp.location - passwdRange.location);
-    } else {
-      // another parameter after &Passwd=foo
-      replaceRange = NSMakeRange(passwdRange.location,
-                           rangeOfFollowingAmp.location - passwdRange.location);
-    }
-
-    NSMutableString *result = [NSMutableString stringWithString:originalStr];
-    NSString *replacement = [NSString stringWithFormat:@"%@_snip_", paramName];
-
-    [result replaceCharactersInRange:replaceRange withString:replacement];
-    return result;
-  }
-  return originalStr;
-}
-
 - (void)setupStreamLogging {
   // if logging is enabled, it needs a buffer to accumulate data from any
   // NSInputStream used for uploading.  Logging will wrap the input
@@ -331,7 +299,8 @@ static NSString* gLoggingProcessName = nil;
 
   // optimistically, see if the whole data block is UTF-8
   NSString *streamDataStr = [self formattedStringFromData:data
-                                              contentType:contentType];
+                                              contentType:contentType
+                                                     JSON:NULL];
   if (streamDataStr) return streamDataStr;
 
   // Munge a buffer by replacing non-ASCII bytes with underscores,
@@ -452,6 +421,7 @@ static NSString* gLoggingProcessName = nil;
 
   NSString *responseBaseName = nil;
   NSString *responseDataStr = nil;
+  NSDictionary *responseJSON = nil;
 
   // if there's response data, decide what kind of file to put it in based
   // on the first bytes of the file or on the mime type supplied by the server
@@ -464,7 +434,8 @@ static NSString* gLoggingProcessName = nil;
 
     NSString *responseType = [responseHeaders valueForKey:@"Content-Type"];
     responseDataStr = [self formattedStringFromData:downloadedData_
-                                        contentType:responseType];
+                                        contentType:responseType
+                                               JSON:&responseJSON];
     if (responseDataStr) {
       // we were able to make a UTF-8 string from the response data
 
@@ -654,6 +625,20 @@ static NSString* gLoggingProcessName = nil;
         postDataTextAreaFmt =  @"<textarea rows=\"15\" cols=\"100\""
          " readonly=true wrap=soft>\n%@\n</textarea>";
       }
+
+      // remove OAuth 2 client secret and refresh token
+      //
+      // we won't worry about the access token, since it expires in an hour
+      // or so anyway
+      postDataStr = [[self class] snipSubtringOfString:postDataStr
+                                    betweenStartString:@"client_secret="
+                                             endString:@"&"];
+
+      postDataStr = [[self class] snipSubtringOfString:postDataStr
+                                    betweenStartString:@"refresh_token="
+                                             endString:@"&"];
+
+      // remove ClientLogin password
       postDataStr = [[self class] snipSubtringOfString:postDataStr
                                     betweenStartString:@"&Passwd="
                                              endString:@"&"];
@@ -677,6 +662,22 @@ static NSString* gLoggingProcessName = nil;
     if (status != 0) {
       if (status == 200 || status == 201) {
         statusString = [NSString stringWithFormat:@"%ld", (long)status];
+
+        // report any JSON-RPC error
+        if ([responseJSON isKindOfClass:[NSDictionary class]]) {
+          NSDictionary *jsonError = [responseJSON objectForKey:@"error"];
+          if ([jsonError isKindOfClass:[NSDictionary class]]) {
+            NSString *jsonCode = [[jsonError valueForKey:@"code"] description];
+            NSString *jsonMessage = [jsonError valueForKey:@"message"];
+            if (jsonCode || jsonMessage) {
+              NSString *jsonErrFmt = @"&nbsp;&nbsp;&nbsp;<i>JSON error:</i> <FONT"
+                @" COLOR=\"#FF00FF\">%@ %@</FONT>";
+              statusString = [statusString stringByAppendingFormat:jsonErrFmt,
+                              jsonCode ? jsonCode : @"",
+                              jsonMessage ? jsonMessage : @""];
+            }
+          }
+        }
       } else {
         // purple for anything other than 200 or 201
         NSString *statusFormat = @"<FONT COLOR=\"#FF00FF\">%ld</FONT>";
@@ -823,6 +824,10 @@ static NSString* gLoggingProcessName = nil;
   if (error) {
     [copyable appendFormat:@"Error: %@\n", error];
   }
+
+  // save to log property before adding the separator
+  self.log = copyable;
+
   [copyable appendString:@"-----------------------------------------------------------\n"];
 
 
@@ -993,6 +998,7 @@ static NSString* gLoggingProcessName = nil;
   for (NSString *key in keys) {
     NSString *value = [dict valueForKey:key];
     if ([key isEqual:@"Authorization"]) {
+      // remove OAuth 1 token
       value = [[self class] snipSubtringOfString:value
                               betweenStartString:@"oauth_token=\""
                                        endString:@"\""];

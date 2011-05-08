@@ -17,8 +17,8 @@
 //  GTMHTTPUploadFetcher.m
 //
 
-#if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_DOCS_SERVICE \
-  || GTL_INCLUDE_YOUTUBE_SERVICE
+#if (!GDATA_REQUIRE_SERVICE_INCLUDES && !GTL_REQUIRE_SERVICE_INCLUDES) \
+  || GDATA_INCLUDE_DOCS_SERVICE || GDATA_INCLUDE_YOUTUBE_SERVICE
 
 #import "GTMHTTPUploadFetcher.h"
 
@@ -44,6 +44,14 @@ totalBytesExpectedToSend:(NSInteger)totalBytesExpected;
 - (void)reportProgressManually;
 
 - (NSUInteger)fullUploadLength;
+
+-(BOOL)chunkFetcher:(GTMHTTPFetcher *)chunkFetcher
+          willRetry:(BOOL)willRetry
+           forError:(NSError *)error;
+
+- (void)chunkFetcher:(GTMHTTPFetcher *)chunkFetcher
+    finishedWithData:(NSData *)data
+               error:(NSError *)error;
 @end
 
 @interface GTMHTTPUploadFetcher (PrivateMethods)
@@ -772,4 +780,4 @@ totalBytesExpectedToSend:(NSInteger)totalBytesExpected {
 
 @end
 
-#endif // !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_DOCS_SERVICE || GTL_INCLUDE_YOUTUBE_SERVICE
+#endif // #if (!GDATA_REQUIRE_SERVICE_INCLUDES && !GTL_REQUIRE_SERVICE_INCLUDES)
