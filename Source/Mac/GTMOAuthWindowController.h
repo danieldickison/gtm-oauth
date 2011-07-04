@@ -110,6 +110,9 @@
   id completionPlaceholder_;
 #endif
 
+  // delegate method for handling URLs to be opened in external windows
+  SEL externalRequestSelector_;
+
   BOOL isWindowShown_;
 
   // paranoid flag to ensure we only close once during the sign-in sequence
@@ -156,6 +159,16 @@
 // sign-in page is 30 seconds, after which the notification
 // kGTLOAuthNetworkLost is sent; set this to 0 to have no timeout
 @property (nonatomic, assign) NSTimeInterval networkLossTimeoutInterval;
+
+// Selector for a delegate method to handle requests sent to an external
+// browser.
+//
+// Selector should have a signature matching
+// - (void)windowController:(GTMOAuthWindowController *)controller
+//             opensRequest:(NSURLRequest *)request;
+//
+// The controller's default behavior is to use NSWorkspace's openURL:
+@property (nonatomic, assign) SEL externalRequestSelector;
 
 // the underlying object to hold authentication tokens and authorize http
 // requests
@@ -241,7 +254,7 @@
 // name (typically set in the initWithScope: method) is non-empty
 //
 
-// create an authentication object for Google services from the access
+// Create an authentication object for Google services from the access
 // token and secret stored in the keychain; if no token is available, return
 // an unauthorized auth object
 + (GTMOAuthAuthentication *)authForGoogleFromKeychainForName:(NSString *)appServiceName;
@@ -250,18 +263,19 @@
                                                  consumerKey:(NSString *)consumerKey
                                                   privateKey:(NSString *)privateKey;
 
-// add tokens from the keychain, if available, to the authentication object
+// Add tokens from the keychain, if available, to an authentication
+// object.  The authentication object must have previously been created.
 //
-// returns YES if the authentication object was authorized from the keychain
+// Returns YES if the authentication object was authorized from the keychain
 + (BOOL)authorizeFromKeychainForName:(NSString *)appServiceName
                       authentication:(GTMOAuthAuthentication *)auth;
 
-// method for deleting the stored access token and secret, useful for "signing
+// Delete the stored access token and secret, useful for "signing
 // out"
 + (BOOL)removeParamsFromKeychainForName:(NSString *)appServiceName;
 
-// method for saving the stored access token and secret; typically, this method
-// is used only by the window controller
+// Store the access token and secret, typically used immediately after
+// signing in
 + (BOOL)saveParamsToKeychainForName:(NSString *)appServiceName
                      authentication:(GTMOAuthAuthentication *)auth;
 @end

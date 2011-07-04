@@ -662,7 +662,7 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
 
 // Implementation of GTMFetcherAuthorizationProtocol methods
 
-- (BOOL)authorizeRequest:(NSMutableURLRequest *)request
+- (void)authorizeRequest:(NSMutableURLRequest *)request
                 delegate:(id)delegate
        didFinishSelector:(SEL)sel {
   // Authorization entry point with callback for OAuth 2
@@ -684,8 +684,6 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
     [invocation setArgument:&error atIndex:4];
     [invocation invoke];
   }
-
-  return (error == nil);
 }
 
 - (void)stopAuthorization {

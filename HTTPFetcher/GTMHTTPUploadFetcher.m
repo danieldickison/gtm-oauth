@@ -18,7 +18,7 @@
 //
 
 #if (!GDATA_REQUIRE_SERVICE_INCLUDES && !GTL_REQUIRE_SERVICE_INCLUDES) \
-  || GDATA_INCLUDE_DOCS_SERVICE || GDATA_INCLUDE_YOUTUBE_SERVICE
+  || GDATA_INCLUDE_DOCS_SERVICE || GDATA_INCLUDE_YOUTUBE_SERVICE || GDATA_INCLUDE_PHOTOS_SERVICE
 
 #import "GTMHTTPUploadFetcher.h"
 
@@ -26,6 +26,7 @@ static NSUInteger const kQueryServerForOffset = NSUIntegerMax;
 
 @interface GTMHTTPFetcher (ProtectedMethods)
 - (void)releaseCallbacks;
+- (void)connectionDidFinishLoading:(NSURLConnection *)connection;
 @end
 
 @interface GTMHTTPUploadFetcher ()
@@ -287,7 +288,14 @@ totalBytesExpectedToSend:totalBytesExpectedToWrite];
   NSInteger statusCode = [super statusCode];
   [self setStatusCode:statusCode];
 
-  if (statusCode >= 300) return;
+  if (statusCode >= 300) {
+    NSError *error = [NSError errorWithDomain:kGTMHTTPFetcherStatusDomain
+                                         code:statusCode
+                                     userInfo:nil];
+    [self invokeFinalCallbacksWithData:[self downloadedData]
+                                 error:error];
+    return;
+  }
 
 #if DEBUG
   // the initial response should have an empty body
@@ -595,11 +603,11 @@ totalBytesExpectedToSend:0];
     return NO;
   }
 
-  if (delegate_ && retrySEL_) {
+  if (delegate_ && retrySel_) {
 
     // call the client with the upload fetcher as the sender (not the chunk
     // fetcher) to find out if it wants to retry
-    willRetry = [self invokeRetryCallback:retrySEL_
+    willRetry = [self invokeRetryCallback:retrySel_
                                    target:delegate_
                                 willRetry:willRetry
                                     error:error];

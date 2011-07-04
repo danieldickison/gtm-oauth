@@ -74,14 +74,16 @@ _EXTERN const NSUInteger kGTMDefaultETaggedDataCacheMemoryCapacity _INITIALIZE_A
 @interface GTMHTTPFetchHistory : NSObject <GTMHTTPFetchHistoryProtocol> {
  @private
   GTMURLCache *etaggedDataCache_;
+  BOOL shouldRememberETags_;
   BOOL shouldCacheETaggedData_;        // if NO, then only headers are cached
   GTMCookieStorage *cookieStorage_;
 }
 
-// with caching enabled, previously-cached data will be returned instead of
+// With caching enabled, previously-cached data will be returned instead of
 // 304 Not Modified responses when repeating a fetch of an URL that previously
 // included an ETag header in its response
-@property (assign) BOOL shouldCacheETaggedData;
+@property (assign) BOOL shouldRememberETags;     // default: NO
+@property (assign) BOOL shouldCacheETaggedData;  // default: NO
 
 // the default ETag data cache capacity is kGTMDefaultETaggedDataCacheMemoryCapacity
 @property (assign) NSUInteger memoryCapacity;

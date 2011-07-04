@@ -217,6 +217,8 @@
 #if defined(GTL_TARGET_NAMESPACE)
   // we're using target namespace macros
   #import "GTLDefines.h"
+#elif defined(GDATA_TARGET_NAMESPACE)
+  #import "GDataDefines.h"
 #else
   #if TARGET_OS_IPHONE
     #ifndef GTM_FOUNDATION_ONLY
@@ -255,7 +257,7 @@ _EXTERN NSString* const kGTMHTTPFetcherRetryDelayStoppedNotification _INITIALIZE
 _EXTERN NSString* const kGTMHTTPFetcherErrorDomain       _INITIALIZE_AS(@"com.google.GTMHTTPFetcher");
 _EXTERN NSString* const kGTMHTTPFetcherStatusDomain      _INITIALIZE_AS(@"com.google.HTTPStatus");
 _EXTERN NSString* const kGTMHTTPFetcherErrorChallengeKey _INITIALIZE_AS(@"challenge");
-_EXTERN NSString* const kGTMHTTPFetcherStatusDataKey     _INITIALIZE_AS(@"data");                        // data returned with a kGTMHTTPFetcherStatusDomain error
+_EXTERN NSString* const kGTMHTTPFetcherStatusDataKey     _INITIALIZE_AS(@"data");  // data returned with a kGTMHTTPFetcherStatusDomain error
 
 enum {
   kGTMHTTPFetcherErrorDownloadFailed = -1,
@@ -267,7 +269,9 @@ enum {
   // look for status 401 instead.
 
   kGTMHTTPFetcherStatusNotModified = 304,
+  kGTMHTTPFetcherStatusBadRequest = 400,
   kGTMHTTPFetcherStatusUnauthorized = 401,
+  kGTMHTTPFetcherStatusForbidden = 403,
   kGTMHTTPFetcherStatusPreconditionFailed = 412
 };
 
@@ -281,21 +285,22 @@ enum {
 
 void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
+@class GTMHTTPFetcher;
+
 @protocol GTMCookieStorageProtocol <NSObject>
-// a minimal protocol to keep the main fetcher class from being dependent
-// on having the GTMCookieStorage class available to compile.  The public
-// interface for cookie handling is the GTMCookieStorage class, accessible
-// from a fetcher service object's fetchHistory or from the fetcher's
+// This protocol allows us to call into the service without requiring
+// GTMCookieStorage sources in this project
+//
+// The public interface for cookie handling is the GTMCookieStorage class,
+// accessible from a fetcher service object's fetchHistory or from the fetcher's
 // +staticCookieStorage method.
 - (NSArray *)cookiesForURL:(NSURL *)theURL;
 - (void)setCookies:(NSArray *)newCookies;
 @end
 
 @protocol GTMHTTPFetchHistoryProtocol <NSObject>
-// a minimal protocol to keep the main fetcher class from being dependent
-// on having the GTMHTTPFetchHistory class available to compile.  The public
-// interface is the GTMHTTPFetchHistory class, accessible from a fetcher
-// service object's fetchHistory
+// This protocol allows us to call the fetch history object without requiring
+// GTMHTTPFetchHistory sources in this project
 - (void)updateRequest:(NSMutableURLRequest *)request isHTTPGet:(BOOL)isHTTPGet;
 - (BOOL)shouldCacheETaggedData;
 - (NSData *)cachedDataForRequest:(NSURLRequest *)request;
@@ -308,17 +313,31 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
 @protocol GTMFetcherAuthorizationProtocol <NSObject>
 @required
-// allow us to call the authorizer without requiring its sources in this project
-- (BOOL)authorizeRequest:(NSMutableURLRequest *)request
+// This protocol allows us to call the authorizer without requiring its sources
+// in this project
+- (void)authorizeRequest:(NSMutableURLRequest *)request
                 delegate:(id)delegate
        didFinishSelector:(SEL)sel;
 
 - (void)stopAuthorization;
 
 - (BOOL)isAuthorizedRequest:(NSURLRequest *)request;
+
+- (NSString *)userEmail;
 @end
 
-// async retrieval of an http get or post
+@protocol GTMHTTPFetcherServiceProtocol <NSObject>
+// This protocol allows us to call into the service without requiring
+// GTMHTTPFetcherService sources in this project
+- (BOOL)fetcherShouldBeginFetching:(GTMHTTPFetcher *)fetcher;
+- (void)fetcherDidStop:(GTMHTTPFetcher *)fetcher;
+
+- (GTMHTTPFetcher *)fetcherWithRequest:(NSURLRequest *)request;
+@end
+
+// GTMHTTPFetcher objects are used for async retrieval of an http get or post
+//
+// See additional comments at the beginning of this file
 @interface GTMHTTPFetcher : NSObject {
  @protected
   NSMutableURLRequest *request_;
@@ -335,9 +354,9 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
   NSMutableData *loggedStreamData_;
   NSURLResponse *response_;         // set in connection:didReceiveResponse:
   id delegate_;
-  SEL finishedSEL_;                 // should by implemented by delegate
-  SEL sentDataSEL_;                 // optional, set with setSentDataSelector
-  SEL receivedDataSEL_;             // optional, set with setReceivedDataSelector
+  SEL finishedSel_;                 // should by implemented by delegate
+  SEL sentDataSel_;                 // optional, set with setSentDataSelector
+  SEL receivedDataSel_;             // optional, set with setReceivedDataSelector
 #if NS_BLOCKS_AVAILABLE
   void (^completionBlock_)(NSData *, NSError *);
   void (^receivedDataBlock_)(NSData *);
@@ -363,8 +382,13 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
   
   id <GTMFetcherAuthorizationProtocol> authorizer_;
 
+  // the service object that created and monitors this fetcher, if any
+  id <GTMHTTPFetcherServiceProtocol> service_;
+  NSString *serviceHost_;
+  NSThread *thread_;
+
   BOOL isRetryEnabled_;             // user wants auto-retry
-  SEL retrySEL_;                    // optional; set with setRetrySelector
+  SEL retrySel_;                    // optional; set with setRetrySelector
   NSTimer *retryTimer_;
   NSUInteger retryCount_;
   NSTimeInterval maxRetryInterval_; // default 600 seconds
@@ -376,7 +400,7 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
   NSString *log_;
 }
 
-// create a fetcher
+// Create a fetcher
 //
 // fetcherWithRequest will return an autoreleased fetcher, but if
 // the connection is successfully created, the connection should retain the
@@ -384,31 +408,31 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // to retain the fetcher explicitly unless they want to be able to cancel it.
 + (GTMHTTPFetcher *)fetcherWithRequest:(NSURLRequest *)request;
 
-// convenience methods that make a request, like +fetcherWithRequest
+// Convenience methods that make a request, like +fetcherWithRequest
 + (GTMHTTPFetcher *)fetcherWithURL:(NSURL *)requestURL;
 + (GTMHTTPFetcher *)fetcherWithURLString:(NSString *)requestURLString;
 
-// designated initializer
+// Designated initializer
 - (id)initWithRequest:(NSURLRequest *)request;
 
-// fetcher request
+// Fetcher request
 //
-// the underlying request is mutable and may be modified by the caller
+// The underlying request is mutable and may be modified by the caller
 @property (retain) NSMutableURLRequest *mutableRequest;
 
-// setting the credential is optional; it is used if the connection receives
+// Setting the credential is optional; it is used if the connection receives
 // an authentication challenge
 @property (retain) NSURLCredential *credential;
 
-// setting the proxy credential is optional; it is used if the connection
+// Setting the proxy credential is optional; it is used if the connection
 // receives an authentication challenge from a proxy
 @property (retain) NSURLCredential *proxyCredential;
 
-// if post data or stream is not set, then a GET retrieval method is assumed
+// If post data or stream is not set, then a GET retrieval method is assumed
 @property (retain) NSData *postData;
 @property (retain) NSInputStream *postStream;
 
-// the default cookie storage method is kGTMHTTPFetcherCookieStorageMethodStatic
+// The default cookie storage method is kGTMHTTPFetcherCookieStorageMethodStatic
 // without a fetch history set, and kGTMHTTPFetcherCookieStorageMethodFetchHistory
 // with a fetch history set
 //
@@ -419,13 +443,23 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
 + (id <GTMCookieStorageProtocol>)staticCookieStorage;
 
-// object to add authorization to the request, if needed
+// Object to add authorization to the request, if needed
 @property (retain) id <GTMFetcherAuthorizationProtocol> authorizer;
 
-// the delegate is retained during the connection
+// The service object that created and monitors this fetcher, if any
+@property (retain) id <GTMHTTPFetcherServiceProtocol> service;
+
+// The host, if any, used to classify this fetcher in the fetcher service
+@property (copy) NSString *serviceHost;
+
+// The thread used to run this fetcher in the fetcher service
+@property (retain) NSThread *thread;
+
+// The delegate is retained during the connection
 @property (retain) id delegate;
 
-// the delegate's optional sentData selector has a signature like:
+// The delegate's optional sentData selector may be used to monitor upload
+// progress. It should have a signature like:
 //  - (void)myFetcher:(GTMHTTPFetcher *)fetcher
 //              didSendBytes:(NSInteger)bytesSent
 //            totalBytesSent:(NSInteger)totalBytesSent
@@ -436,27 +470,33 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
 @property (assign) SEL sentDataSelector;
 
-// the delegate's optional receivedData selector has a signature like:
-//  - (void)myFetcher:(GTMHTTPFetcher *)fetcher receivedData:(NSData *)dataReceivedSoFar;
+// The delegate's optional receivedData selector may be used to monitor download
+// progress. It should have a signature like:
+//  - (void)myFetcher:(GTMHTTPFetcher *)fetcher
+//       receivedData:(NSData *)dataReceivedSoFar;
 //
-// The dataReceived argument will be nil when downloading to a file handle
+// The dataReceived argument will be nil when downloading to a file handle.
+//
+// Applications should not use this method to accumulate the received data;
+// the callback method or block supplied to the beginFetch call will have
+// the complete NSData received.
 @property (assign) SEL receivedDataSelector;
 
 #if NS_BLOCKS_AVAILABLE
-// the full interface to the block is provided rather than just a typedef for
+// The full interface to the block is provided rather than just a typedef for
 // its parameter list in order to get more useful code completion in the Xcode
 // editor
-- (void)setSentDataBlock:(void (^)(NSInteger bytesSent, NSInteger totalBytesSent, NSInteger bytesExpectedToSend))block;
+@property (copy) void (^sentDataBlock)(NSInteger bytesSent, NSInteger totalBytesSent, NSInteger bytesExpectedToSend);
 
 // The dataReceived argument will be nil when downloading to a file handle
-- (void)setReceivedDataBlock:(void (^)(NSData *dataReceivedSoFar))block;
+@property (copy) void (^receivedDataBlock)(NSData *dataReceivedSoFar);
 #endif
 
 // retrying; see comments at the top of the file.  Calling
 // setRetryEnabled(YES) resets the min and max retry intervals.
 @property (assign, getter=isRetryEnabled) BOOL retryEnabled;
 
-// retry selector or block is optional for retries.
+// Retry selector or block is optional for retries.
 //
 // If present, it should have the signature:
 //   -(BOOL)fetcher:(GTMHTTPFetcher *)fetcher willRetry:(BOOL)suggestedWillRetry forError:(NSError *)error
@@ -464,10 +504,10 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 @property (assign) SEL retrySelector;
 
 #if NS_BLOCKS_AVAILABLE
-- (void)setRetryBlock:(BOOL (^)(BOOL suggestedWillRetry, NSError *error))block;
+@property (copy) BOOL (^retryBlock)(BOOL suggestedWillRetry, NSError *error);
 #endif
 
-// retry intervals must be strictly less than maxRetryInterval, else
+// Retry intervals must be strictly less than maxRetryInterval, else
 // they will be limited to maxRetryInterval and no further retries will
 // be attempted.  Setting maxRetryInterval to 0.0 will reset it to the
 // default value, 600 seconds.
@@ -483,7 +523,7 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // Clients should not need to call this.
 @property (assign) double retryFactor;
 
-// number of retries attempted
+// Number of retries attempted
 @property (readonly) NSUInteger retryCount;
 
 // interval delay to precede next retry
@@ -518,29 +558,29 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // Cancel the fetch of the request that's currently in progress
 - (void)stopFetching;
 
-// return the status code from the server response
+// Return the status code from the server response
 @property (readonly) NSInteger statusCode;
 
-// return the http headers from the response
+// Return the http headers from the response
 @property (retain, readonly) NSDictionary *responseHeaders;
 
-// the response, once it's been received
+// The response, once it's been received
 @property (retain) NSURLResponse *response;
 
-// bytes downloaded so far
+// Bytes downloaded so far
 @property (readonly) unsigned long long downloadedLength;
 
-// buffer of currently-downloaded data
-@property (readonly) NSData *downloadedData;
+// Buffer of currently-downloaded data
+@property (readonly, retain) NSData *downloadedData;
 
-// path in which to non-atomically create a file for storing the downloaded data
+// Path in which to non-atomically create a file for storing the downloaded data
 //
 // The path must be set before fetching begins.  The download file handle
 // will be created for the path, and can be used to monitor progress. If a file
 // already exists at the path, it will be overwritten.
 @property (copy) NSString *downloadPath;
 
-// if downloadFileHandle is set, data received is immediately appended to
+// If downloadFileHandle is set, data received is immediately appended to
 // the file handle rather than being accumulated in the downloadedData property
 //
 // The file handle supplied must allow writing and support seekToFileOffset:,
@@ -548,15 +588,17 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 // override the file handle property.
 @property (retain) NSFileHandle *downloadFileHandle;
 
-// if the caller supplies a mutable dictionary, it's used for Last-Modified-Since
-//  checks and for cookie storage
-//  side effect: setting fetch history implicitly calls setCookieStorageMethod:
+// The optional fetchHistory object is used for a sequence of fetchers to
+// remember ETags, cache ETagged data, and store cookies.  Typically, this
+// is set by a GTMFetcherService object when it creates a fetcher.
+//
+// Side effect: setting fetch history implicitly calls setCookieStorageMethod:
 @property (retain) id <GTMHTTPFetchHistoryProtocol> fetchHistory;
 
 // userData is retained for the convenience of the caller
 @property (retain) id userData;
 
-// stored property values are retained for the convenience of the caller
+// Stored property values are retained for the convenience of the caller
 @property (retain) NSDictionary *properties;
 
 - (void)setProperty:(id)obj forKey:(NSString *)key; // pass nil obj to remove property
@@ -564,19 +606,19 @@ void GTMAssertSelectorNilOrImplementedWithArgs(id obj, SEL sel, ...);
 
 - (void)addPropertiesFromDictionary:(NSDictionary *)dict;
 
-// comments are useful for logging
+// Comments are useful for logging
 @property (copy) NSString *comment;
 
 - (void)setCommentWithFormat:(id)format, ...;
 
-// log of request and response, if logging is enabled
+// Log of request and response, if logging is enabled
 @property (copy) NSString *log;
 
-// using the fetcher while a modal dialog is displayed requires setting the
+// Using the fetcher while a modal dialog is displayed requires setting the
 // run-loop modes to include NSModalPanelRunLoopMode
 @property (retain) NSArray *runLoopModes;
 
-// users who wish to replace GTMHTTPFetcher's use of NSURLConnection
+// Users who wish to replace GTMHTTPFetcher's use of NSURLConnection
 // can do so globally here.  The replacement should be a subclass of
 // NSURLConnection.
 + (Class)connectionClass;

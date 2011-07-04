@@ -21,8 +21,6 @@
 
 #import "GTMHTTPFetcher.h"
 
-SEL const kUnifiedFailureCallback = (SEL) (void *) -1;
-
 static id <GTMCookieStorageProtocol> gGTMFetcherStaticCookieStorage = nil;
 static Class gGTMFetcherConnectionClass = nil;
 
@@ -32,21 +30,25 @@ const NSTimeInterval kUnsetMaxRetryInterval = -1;
 const NSTimeInterval kDefaultMaxDownloadRetryInterval = 60.0;
 const NSTimeInterval kDefaultMaxUploadRetryInterval = 60.0 * 10.;
 
-// authorization
-static NSString *const kAuthDelegateKey = @"_authDelegate";
-static NSString *const kAuthSelectorKey = @"_authSel";
-
 //
 // GTMHTTPFetcher
 //
 
 @interface GTMHTTPFetcher ()
+
 @property (copy) NSString *temporaryDownloadPath;
 @property (retain) id <GTMCookieStorageProtocol> cookieStorage;
+@property (readwrite, retain) NSData *downloadedData;
+#if NS_BLOCKS_AVAILABLE
+@property (copy) void (^completionBlock)(NSData *, NSError *);
+#endif
 
-- (BOOL)authorizeRequestWithDelegate:(id)delegate
-                   didFinishSelector:(SEL)finishedSel;
-- (void)authorizer:(id)auth
+- (BOOL)beginFetchMayDelay:(BOOL)mayDelay
+              mayAuthorize:(BOOL)mayAuthorize;
+- (void)failToBeginFetchWithError:(NSError *)error;
+
+- (BOOL)authorizeRequest;
+- (void)authorizer:(id <GTMFetcherAuthorizationProtocol>)auth
            request:(NSMutableURLRequest *)request
  finishedWithError:(NSError *)error;
 
@@ -65,6 +67,8 @@ static NSString *const kAuthSelectorKey = @"_authSel";
                        data:(NSData *)data
                       error:(NSError *)error;
 - (void)releaseCallbacks;
+
+- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error;
 
 - (BOOL)shouldRetryNowForStatus:(NSInteger)status error:(NSError *)error;
 - (void)destroyRetryTimer;
@@ -133,6 +137,11 @@ static NSString *const kAuthSelectorKey = @"_authSel";
   return nil;
 }
 
+- (NSString *)description {
+  return [NSString stringWithFormat:@"%@ %p (%@)",
+          [self class], self, [self.mutableRequest URL]];
+}
+
 #if !GTM_IPHONE
 - (void)finalize {
   [self stopFetchReleasingCallbacks:YES]; // releases connection_, destroys timers
@@ -141,39 +150,41 @@ static NSString *const kAuthSelectorKey = @"_authSel";
 #endif
 
 - (void)dealloc {
-  // note: if a connection or a retry timer was pending, then this instance
+  // Note: if a connection or a retry timer was pending, then this instance
   // would be retained by those so it wouldn't be getting dealloc'd,
   // hence we don't need to stopFetch here
-  [request_ release];
   [connection_ release];
-  [downloadedData_ release];
-  [downloadPath_ release];
-  [temporaryDownloadPath_ release];
-  [downloadFileHandle_ release];
-  [credential_ release];
-  [proxyCredential_ release];
-  [postData_ release];
-  [postStream_ release];
-  [authorizer_ release];
   [loggedStreamData_ release];
-  [response_ release];
-#if NS_BLOCKS_AVAILABLE
-  [completionBlock_ release];
-  [receivedDataBlock_ release];
-  [sentDataBlock_ release];
-  [retryBlock_ release];
-#endif
-  [userData_ release];
-  [properties_ release];
-  [runLoopModes_ release];
-  [fetchHistory_ release];
-  [cookieStorage_ release];
-
   [retryTimer_ invalidate];
   [retryTimer_ release];
-
-  [comment_ release];
-
+  
+  self.mutableRequest = nil;
+  self.downloadedData = nil;
+  self.downloadPath = nil;
+  self.temporaryDownloadPath = nil;
+  self.downloadFileHandle = nil;
+  self.credential = nil;
+  self.proxyCredential = nil;
+  self.postData = nil;
+  self.postStream = nil;
+  self.authorizer = nil;
+  self.service = nil;
+  self.serviceHost = nil;
+  self.thread = nil;
+  self.response = nil;
+  self.userData = nil;
+  self.properties = nil;
+  self.runLoopModes = nil;
+  self.fetchHistory = nil;
+  self.cookieStorage = nil;
+  self.comment = nil;
+#if NS_BLOCKS_AVAILABLE
+  self.completionBlock = nil;
+  self.receivedDataBlock = nil;
+  self.sentDataBlock = nil;
+  self.retryBlock = nil;
+#endif
+  
   [super dealloc];
 }
 
@@ -183,11 +194,25 @@ static NSString *const kAuthSelectorKey = @"_authSel";
 // for the duration of the fetch connection.
 
 - (BOOL)beginFetchWithDelegate:(id)delegate
-             didFinishSelector:(SEL)finishedSEL {
-  GTMAssertSelectorNilOrImplementedWithArgs(delegate, finishedSEL, @encode(GTMHTTPFetcher *), @encode(NSData *), @encode(NSError *), 0);
-  GTMAssertSelectorNilOrImplementedWithArgs(delegate, receivedDataSEL_, @encode(GTMHTTPFetcher *), @encode(NSData *), 0);
-  GTMAssertSelectorNilOrImplementedWithArgs(delegate, retrySEL_, @encode(GTMHTTPFetcher *), @encode(BOOL), @encode(NSError *), 0);
+             didFinishSelector:(SEL)finishedSelector {
+  GTMAssertSelectorNilOrImplementedWithArgs(delegate, finishedSelector, @encode(GTMHTTPFetcher *), @encode(NSData *), @encode(NSError *), 0);
+  GTMAssertSelectorNilOrImplementedWithArgs(delegate, receivedDataSel_, @encode(GTMHTTPFetcher *), @encode(NSData *), 0);
+  GTMAssertSelectorNilOrImplementedWithArgs(delegate, retrySel_, @encode(GTMHTTPFetcher *), @encode(BOOL), @encode(NSError *), 0);
 
+  // We'll retain the delegate only during the outstanding connection (similar
+  // to what Cocoa does with performSelectorOnMainThread:) and during
+  // authorization or delays, since the app would crash
+  // if the delegate was released before the fetch calls back
+  [self setDelegate:delegate];
+  finishedSel_ = finishedSelector;
+
+  return [self beginFetchMayDelay:YES
+                     mayAuthorize:YES];
+}
+
+- (BOOL)beginFetchMayDelay:(BOOL)mayDelay
+              mayAuthorize:(BOOL)mayAuthorize {
+  // This is the internal entry point for re-starting fetches
   NSError *error = nil;
 
   if (connection_ != nil) {
@@ -200,21 +225,24 @@ static NSString *const kAuthSelectorKey = @"_authSel";
     goto CannotBeginFetch;
   }
 
-  if (authorizer_) {
-    BOOL isAuthorized = [authorizer_ isAuthorizedRequest:request_];
-    if (!isAuthorized) {
-      // authorization needed
-      return [self authorizeRequestWithDelegate:delegate
-                              didFinishSelector:finishedSEL];
+  self.downloadedData = nil;
+  downloadedLength_ = 0;
+
+  if (mayDelay && service_) {
+    BOOL shouldFetchNow = [service_ fetcherShouldBeginFetching:self];
+    if (!shouldFetchNow) {
+      // the fetch is deferred, but will happen later
+      return YES;
     }
   }
 
-  [downloadedData_ release];
-  downloadedData_ = nil;
-
-  downloadedLength_ = 0;
-
-  finishedSEL_ = finishedSEL;
+  if (mayAuthorize && authorizer_) {
+    BOOL isAuthorized = [authorizer_ isAuthorizedRequest:request_];
+    if (!isAuthorized) {
+      // authorization needed
+      return [self authorizeRequest];
+    }
+  }
 
   NSString *effectiveHTTPMethod = [request_ valueForHTTPHeaderField:@"X-HTTP-Method-Override"];
   if (effectiveHTTPMethod == nil) {
@@ -308,15 +336,10 @@ static NSString *const kAuthSelectorKey = @"_authSel";
     goto CannotBeginFetch;
   }
 
-  // We'll retain the delegate only during the outstanding connection (similar
-  // to what Cocoa does with performSelectorOnMainThread:) since we'd crash
-  // if the delegate was released in the interim.
-  [self setDelegate:delegate];
-
   if (downloadFileHandle_ != nil) {
     // downloading to a file, so downloadedData_ remains nil
   } else {
-    downloadedData_ = [[NSMutableData alloc] init];
+    self.downloadedData = [NSMutableData data];
   }
 
   // once connection_ is non-nil we can send the start notification
@@ -327,89 +350,77 @@ static NSString *const kAuthSelectorKey = @"_authSel";
   return YES;
 
 CannotBeginFetch:
-  {
-    if (error == nil) {
-      error = [NSError errorWithDomain:kGTMHTTPFetcherErrorDomain
-                                  code:kGTMHTTPFetcherErrorDownloadFailed
-                              userInfo:nil];
-    }
-    if (finishedSEL) {
-      [[self retain] autorelease]; // in case the callback releases us
-
-      [self invokeFetchCallback:finishedSEL
-                         target:delegate
-                           data:nil
-                          error:error];
-    }
-
-#if NS_BLOCKS_AVAILABLE
-    if (completionBlock_) {
-      completionBlock_(nil, error);
-    }
-#endif
-    [self releaseCallbacks];
-
-    self.authorizer = nil;
-
-    if (temporaryDownloadPath_) {
-      [[self fileManager] removeItemAtPath:temporaryDownloadPath_
-                                     error:NULL];
-      self.temporaryDownloadPath = nil;
-    }
-  }
+  [self failToBeginFetchWithError:error];
   return NO;
 }
 
-- (BOOL)authorizeRequestWithDelegate:(id)delegate
-                   didFinishSelector:(SEL)finishedSel {
+- (void)failToBeginFetchWithError:(NSError *)error {
+  if (error == nil) {
+    error = [NSError errorWithDomain:kGTMHTTPFetcherErrorDomain
+                                code:kGTMHTTPFetcherErrorDownloadFailed
+                            userInfo:nil];
+  }
+
+  [[self retain] autorelease]; // in case the callback releases us
+
+  [self invokeFetchCallback:finishedSel_
+                     target:delegate_
+                       data:nil
+                      error:error];
+
+#if NS_BLOCKS_AVAILABLE
+  if (completionBlock_) {
+    completionBlock_(nil, error);
+  }
+#endif
+
+  [self releaseCallbacks];
+
+  [service_ fetcherDidStop:self];
+
+  self.authorizer = nil;
+
+  if (temporaryDownloadPath_) {
+    [[self fileManager] removeItemAtPath:temporaryDownloadPath_
+                                   error:NULL];
+    self.temporaryDownloadPath = nil;
+  }
+}
+
+- (BOOL)authorizeRequest {
   id authorizer = self.authorizer;
   SEL asyncAuthSel = @selector(authorizeRequest:delegate:didFinishSelector:);
   if ([authorizer respondsToSelector:asyncAuthSel]) {
-    // async authorization; hold on to the client's delegate and selector in
-    // properties of the fetcher object
-    NSString *selStr = (finishedSel ? NSStringFromSelector(finishedSel) : nil);
-    [self setProperty:delegate forKey:kAuthDelegateKey];
-    [self setProperty:selStr forKey:kAuthSelectorKey];
-
     SEL callbackSel = @selector(authorizer:request:finishedWithError:);
-    BOOL isAuthing = [authorizer authorizeRequest:request_
-                                         delegate:self
-                                didFinishSelector:callbackSel];
-    return isAuthing;
+    [authorizer authorizeRequest:request_
+                        delegate:self
+               didFinishSelector:callbackSel];
+    return YES;
   } else {
     NSAssert(authorizer == nil, @"invalid authorizer for fetch");
 
-    // no authorizing possible; just begin fetching
-    return [self beginFetchWithDelegate:delegate
-                      didFinishSelector:finishedSel];
+    // no authorizing possible, and authorizing happens only after any delay;
+    // just begin fetching
+    return [self beginFetchMayDelay:NO
+                       mayAuthorize:NO];
   }
 }
 
 - (void)authorizer:(id <GTMFetcherAuthorizationProtocol>)auth
            request:(NSMutableURLRequest *)request
  finishedWithError:(NSError *)error {
-  id delegate = [self propertyForKey:kAuthDelegateKey];
-  NSString *selStr = [self propertyForKey:kAuthSelectorKey];
-  SEL finishedSel = selStr ? NSSelectorFromString(selStr) : NULL;
-
   if (error != nil) {
     // we can't fetch without authorization
-    [self invokeFetchCallback:finishedSel
-                       target:delegate
-                         data:nil
-                        error:error];
+    [self failToBeginFetchWithError:error];
   } else {
-    [self beginFetchWithDelegate:delegate
-               didFinishSelector:finishedSel];
+    [self beginFetchMayDelay:NO
+                mayAuthorize:NO];
   }
-
-  [self setProperty:nil forKey:kAuthDelegateKey];
-  [self setProperty:nil forKey:kAuthSelectorKey];
 }
 
 #if NS_BLOCKS_AVAILABLE
 - (BOOL)beginFetchWithCompletionHandler:(void (^)(NSData *data, NSError *error))handler {
-  completionBlock_ = [handler copy];
+  self.completionBlock = handler;
 
   // the user may have called setDelegate: earlier if they want to use other
   // delegate-style callbacks during the fetch; otherwise, the delegate is nil,
@@ -419,7 +430,7 @@ CannotBeginFetch:
 }
 #endif
 
-- (NSString *)createTempDownloadFilePathForPath:targetPath {
+- (NSString *)createTempDownloadFilePathForPath:(NSString *)targetPath {
   NSString *tempDir = nil;
 
 #if (!TARGET_OS_IPHONE && (MAC_OS_X_VERSION_MAX_ALLOWED >= 1060)) || (TARGET_OS_IPHONE && (__IPHONE_OS_VERSION_MAX_ALLOWED >= 40000))
@@ -510,12 +521,10 @@ CannotBeginFetch:
   delegate_ = nil;
 
 #if NS_BLOCKS_AVAILABLE
-  [completionBlock_ autorelease];
-  completionBlock_ = nil;
-
-  [self setSentDataBlock:nil];
-  [self setReceivedDataBlock:nil];
-  [self setRetryBlock:nil];
+  self.completionBlock = nil;
+  self.sentDataBlock = nil;
+  self.receivedDataBlock = nil;
+  self.retryBlock = nil;
 #endif
 }
 
@@ -554,6 +563,8 @@ CannotBeginFetch:
     self.authorizer = nil;
   }
 
+  [service_ fetcherDidStop:self];
+
   if (temporaryDownloadPath_) {
     [[NSFileManager defaultManager] removeItemAtPath:temporaryDownloadPath_
                                                error:NULL];
@@ -581,7 +592,7 @@ CannotBeginFetch:
   [self stopFetchReleasingCallbacks:NO];
 
   [self beginFetchWithDelegate:delegate_
-             didFinishSelector:finishedSEL_];
+             didFinishSelector:finishedSel_];
 }
 
 - (void)waitForCompletionWithTimeout:(NSTimeInterval)timeoutInSeconds {
@@ -881,8 +892,8 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
     downloadedLength_ = [downloadedData_ length];
   }
 
-  if (receivedDataSEL_) {
-    [delegate_ performSelector:receivedDataSEL_
+  if (receivedDataSel_) {
+    [delegate_ performSelector:receivedDataSel_
                     withObject:self
                     withObject:downloadedData_];
   }
@@ -998,7 +1009,7 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
 
   if (shouldStopFetching) {
     // call the callbacks
-    [self invokeFetchCallback:finishedSEL_
+    [self invokeFetchCallback:finishedSel_
                        target:delegate_
                          data:downloadedData_
                         error:error];
@@ -1047,7 +1058,7 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
 
     [[self retain] autorelease]; // in case the callback releases us
 
-    [self invokeFetchCallback:finishedSEL_
+    [self invokeFetchCallback:finishedSel_
                        target:delegate_
                          data:nil
                         error:error];
@@ -1079,16 +1090,12 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
     int code;
   };
 
-  // Previously we also retried for
-  //   { NSURLErrorDomain, NSURLErrorNetworkConnectionLost }
-  // but at least on 10.4, once that happened, retries would keep failing
-  // with the same error.
-
   struct retryRecord retries[] = {
     { kGTMHTTPFetcherStatusDomain, 408 }, // request timeout
     { kGTMHTTPFetcherStatusDomain, 503 }, // service unavailable
     { kGTMHTTPFetcherStatusDomain, 504 }, // request timeout
     { NSURLErrorDomain, NSURLErrorTimedOut },
+    { NSURLErrorDomain, NSURLErrorNetworkConnectionLost },
     { nil, 0 }
   };
 
@@ -1127,7 +1134,7 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
 
       BOOL willRetry = [self isRetryError:error];
 
-      willRetry = [self invokeRetryCallback:retrySEL_
+      willRetry = [self invokeRetryCallback:retrySel_
                                      target:delegate_
                                   willRetry:willRetry
                                       error:error];
@@ -1229,13 +1236,6 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
   isRetryEnabled_ = flag;
 };
 
-#if NS_BLOCKS_AVAILABLE
-- (void)setRetryBlock:(BOOL (^)(BOOL, NSError *))block {
-  [retryBlock_ autorelease];
-  retryBlock_ = [block copy];
-}
-#endif
-
 - (NSTimeInterval)maxRetryInterval {
   return maxRetryInterval_;
 }
@@ -1284,9 +1284,12 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
             postStream = postStream_,
             delegate = delegate_,
             authorizer = authorizer_,
-            sentDataSelector = sentDataSEL_,
-            receivedDataSelector = receivedDataSEL_,
-            retrySelector = retrySEL_,
+            service = service_,
+            serviceHost = serviceHost_,
+            thread = thread_,
+            sentDataSelector = sentDataSel_,
+            receivedDataSelector = receivedDataSel_,
+            retrySelector = retrySel_,
             retryFactor = retryFactor_,
             response = response_,
             downloadedLength = downloadedLength_,
@@ -1298,6 +1301,13 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
             comment = comment_,
             log = log_,
             cookieStorage = cookieStorage_;
+
+#if NS_BLOCKS_AVAILABLE
+@synthesize completionBlock = completionBlock_,
+            sentDataBlock = sentDataBlock_,
+            receivedDataBlock = receivedDataBlock_,
+            retryBlock = retryBlock_;
+#endif
 
 - (NSInteger)cookieStorageMethod {
   return cookieStorageMethod_;
@@ -1348,18 +1358,6 @@ totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite {
   return (NSFoundationVersionNumber > 677.21);
 #endif
 }
-
-#if NS_BLOCKS_AVAILABLE
-- (void)setSentDataBlock:(void (^)(NSInteger, NSInteger, NSInteger))block {
-  [sentDataBlock_ autorelease];
-  sentDataBlock_ = [block copy];
-}
-
-- (void)setReceivedDataBlock:(void (^)(NSData *))block {
-  [receivedDataBlock_ autorelease];
-  receivedDataBlock_ = [block copy];
-}
-#endif
 
 - (id <GTMHTTPFetchHistoryProtocol>)fetchHistory {
   return fetchHistory_;

@@ -18,10 +18,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#ifdef GTL_TARGET_NAMESPACE
-  #import "GTLDefines.h"
-#endif
-
 #import "GTMHTTPFetcherLogging.h"
 
 // If GTMProgressMonitorInputStream is available, it can be used for
@@ -38,8 +34,14 @@
 - (void)setRunLoopModes:(NSArray *)modes;
 @end
 
-// If SBJSON is available, it is used for formatting JSON
-@interface SBJSON
+// If GTMNSJSONSerialization is available, it is used for formatting JSON
+@interface GTMNSJSONSerialization : NSObject
++ (NSData *)dataWithJSONObject:(id)obj options:(NSUInteger)opt error:(NSError **)error;
++ (id)JSONObjectWithData:(NSData *)data options:(NSUInteger)opt error:(NSError **)error;
+@end
+
+// Otherwise, if SBJSON is available, it is used for formatting JSON
+@interface GTMFetcherSBJSON
 - (void)setHumanReadable:(BOOL)flag;
 - (NSString*)stringWithObject:(id)value error:(NSError**)error;
 - (id)objectWithString:(NSString*)jsonrep error:(NSError**)error;
@@ -63,12 +65,16 @@
 + (NSString *)snipSubtringOfString:(NSString *)originalStr
                 betweenStartString:(NSString *)startStr
                          endString:(NSString *)endStr;
+
++ (id)JSONObjectWithData:(NSData *)data;
++ (id)stringWithJSONObject:(id)obj;
 @end
 
 @implementation GTMHTTPFetcher (GTMHTTPFetcherLogging)
 
 // fetchers come and fetchers go, but statics are forever
 static BOOL gIsLoggingEnabled = NO;
+static BOOL gIsLoggingToFile = YES;
 static NSString *gLoggingDirectoryPath = nil;
 static NSString *gLoggingDateStamp = nil;
 static NSString* gLoggingProcessName = nil;
@@ -127,6 +133,14 @@ static NSString* gLoggingProcessName = nil;
   return gIsLoggingEnabled;
 }
 
++ (void)setLoggingToFileEnabled:(BOOL)flag {
+  gIsLoggingToFile = flag;
+}
+
++ (BOOL)isLoggingToFileEnabled {
+  return gIsLoggingToFile;
+}
+
 + (void)setLoggingProcessName:(NSString *)str {
   [gLoggingProcessName release];
   gLoggingProcessName = [str copy];
@@ -170,7 +184,6 @@ static NSString* gLoggingProcessName = nil;
   return gLoggingDateStamp;
 }
 
-
 // formattedStringFromData returns a prettyprinted string for XML or JSON input,
 // and a plain string for other input data
 - (NSString *)formattedStringFromData:(NSData *)inputData
@@ -182,31 +195,22 @@ static NSString* gLoggingProcessName = nil;
   // use that
   if ([contentType hasPrefix:@"application/json"]
       && [inputData length] > 5) {
-    Class jsonClass = NSClassFromString(@"SBJSON");
-    if (jsonClass) {
-      SBJSON *parser = [[[jsonClass alloc] init] autorelease];
-      [parser setHumanReadable:YES];
-      NSString *jsonStr = [[[NSString alloc] initWithData:inputData
-                                                 encoding:NSUTF8StringEncoding] autorelease];
-      if (jsonStr) {
-        // convert from JSON string to NSObjects and back to a formatted string
-        NSMutableDictionary *obj = [parser objectWithString:jsonStr error:NULL];
-        if (obj) {
-          if (outJSON) *outJSON = obj;
-          if ([obj isKindOfClass:[NSMutableDictionary class]]) {
-            // for security and privacy, omit OAuth 2 response refresh tokens
-            //
-            // we'll assume that any JSON with "refresh_token" and "access_token"
-            // keys in the response is an OAuth 2 token endpoint response
-            if ([obj valueForKey:@"refresh_token"] != nil
-                && [obj valueForKey:@"access_token"] != nil) {
-              [obj setObject:@"_snip_" forKey:@"refresh_token"];
-            }
-          }
-          NSString *formatted = [parser stringWithObject:obj error:NULL];
-          if (formatted) return formatted;
+    // convert from JSON string to NSObjects and back to a formatted string
+    NSMutableDictionary *obj = [[self class] JSONObjectWithData:inputData];
+    if (obj) {
+      if (outJSON) *outJSON = obj;
+      if ([obj isKindOfClass:[NSMutableDictionary class]]) {
+        // for security and privacy, omit OAuth 2 response access and refresh
+        // tokens
+        if ([obj valueForKey:@"refresh_token"] != nil) {
+          [obj setObject:@"_snip_" forKey:@"refresh_token"];          
+        }
+        if ([obj valueForKey:@"access_token"] != nil) {
+          [obj setObject:@"_snip_" forKey:@"access_token"];
         }
       }
+      NSString *formatted = [[self class] stringWithJSONObject:obj];
+      if (formatted) return formatted;
     }
   }
 
@@ -393,7 +397,7 @@ static NSString* gLoggingProcessName = nil;
   NSString *dirName = [NSString stringWithFormat:@"%@_log_%@",
                        processName, dateStamp];
   NSString *logDirectory = [parentDir stringByAppendingPathComponent:dirName];
-  if (![[self class] makeDirectoryUpToPath:logDirectory]) return;
+  if (gIsLoggingToFile && ![[self class] makeDirectoryUpToPath:logDirectory]) return;
 
   // each response's NSData goes into its own xml or txt file, though all
   // responses for this run of the app share a main html file.  This
@@ -411,7 +415,7 @@ static NSString* gLoggingProcessName = nil;
   NSString *responseDataFormattedFileName = nil;
   NSUInteger responseDataLength;
   if (downloadFileHandle_) {
-    responseDataLength = [downloadFileHandle_ offsetInFile];
+    responseDataLength = (NSUInteger) [downloadFileHandle_ offsetInFile];
   } else {
     responseDataLength = [downloadedData_ length];
   }
@@ -455,12 +459,13 @@ static NSString* gLoggingProcessName = nil;
       NSString* wrappedStr = [NSString stringWithFormat:wrapFmt, responseDataStr];
       {
         NSError *wrappedStrError = nil;
-        if (![wrappedStr writeToFile:textFilePath
-                          atomically:NO
-                            encoding:NSUTF8StringEncoding
-                               error:&wrappedStrError]) {
-          NSLog(@"%@ logging write error:%@ (%@)",
-                [self class], wrappedStrError, responseDataUnformattedFileName);
+        if (gIsLoggingToFile
+            && ![wrappedStr writeToFile:textFilePath
+                             atomically:NO
+                               encoding:NSUTF8StringEncoding
+                                  error:&wrappedStrError]) {
+              NSLog(@"%@ logging write error:%@ (%@)",
+                    [self class], wrappedStrError, responseDataUnformattedFileName);
         }
       }
 
@@ -494,12 +499,13 @@ static NSString* gLoggingProcessName = nil;
       NSString *formattedFilePath = [logDirectory stringByAppendingPathComponent:responseDataFormattedFileName];
 
       NSError *downloadedError = nil;
-      if (![downloadedData_ writeToFile:formattedFilePath
-                                options:0
-                                  error:&downloadedError]) {
-        NSLog(@"%@ logging write error:%@ (%@)",
-              [self class], downloadedError, responseDataFormattedFileName);
-      }
+      if (gIsLoggingToFile
+          && ![downloadedData_ writeToFile:formattedFilePath
+                                   options:0
+                                     error:&downloadedError]) {
+            NSLog(@"%@ logging write error:%@ (%@)",
+                  [self class], downloadedError, responseDataFormattedFileName);
+          }
     }
   }
 
@@ -627,9 +633,6 @@ static NSString* gLoggingProcessName = nil;
       }
 
       // remove OAuth 2 client secret and refresh token
-      //
-      // we won't worry about the access token, since it expires in an hour
-      // or so anyway
       postDataStr = [[self class] snipSubtringOfString:postDataStr
                                     betweenStartString:@"client_secret="
                                              endString:@"&"];
@@ -838,35 +841,37 @@ static NSString* gLoggingProcessName = nil;
   //   <span onCopy='window.event.clipboardData.setData(\"Text\",
   //   \"copyable stuff\");return false;'>Copy here.</span>"
   // would work everywhere, but it only works in Safari as of 8/2010
-  NSString *copyablePath = [logDirectory stringByAppendingPathComponent:copyableFileName];
-  NSError *copyableError = nil;
-  if (![copyable writeToFile:copyablePath
-                  atomically:NO
-                    encoding:NSUTF8StringEncoding
-                       error:&copyableError]) {
-   // error writing to file
-    NSLog(@"%@ logging write error:%@ (%@)",
-          [self class], copyableError, copyablePath);
+  if (gIsLoggingToFile) {
+    NSString *copyablePath = [logDirectory stringByAppendingPathComponent:copyableFileName];
+    NSError *copyableError = nil;
+    if (![copyable writeToFile:copyablePath
+                    atomically:NO
+                      encoding:NSUTF8StringEncoding
+                         error:&copyableError]) {
+      // error writing to file
+      NSLog(@"%@ logging write error:%@ (%@)",
+            [self class], copyableError, copyablePath);
+    }
+
+    [outputHTML appendString:@"<br><hr><p>"];
+
+    // append the HTML to the main output file
+    const char* htmlBytes = [outputHTML UTF8String];
+    NSOutputStream *stream = [NSOutputStream outputStreamToFileAtPath:htmlPath
+                                                               append:YES];
+    [stream open];
+    [stream write:(const uint8_t *) htmlBytes maxLength:strlen(htmlBytes)];
+    [stream close];
+
+    // make a symlink to the latest html
+    NSString *symlinkName = [NSString stringWithFormat:@"%@_log_newest.html",
+                             processName];
+    NSString *symlinkPath = [parentDir stringByAppendingPathComponent:symlinkName];
+
+    [[self class] removeItemAtPath:symlinkPath];
+    [[self class] createSymbolicLinkAtPath:symlinkPath
+                       withDestinationPath:htmlPath];
   }
-
-  [outputHTML appendString:@"<br><hr><p>"];
-
-  // append the HTML to the main output file
-  const char* htmlBytes = [outputHTML UTF8String];
-  NSOutputStream *stream = [NSOutputStream outputStreamToFileAtPath:htmlPath
-                                                             append:YES];
-  [stream open];
-  [stream write:(const uint8_t *) htmlBytes maxLength:strlen(htmlBytes)];
-  [stream close];
-
-  // make a symlink to the latest html
-  NSString *symlinkName = [NSString stringWithFormat:@"%@_log_newest.html",
-                           processName];
-  NSString *symlinkPath = [parentDir stringByAppendingPathComponent:symlinkName];
-
-  [[self class] removeItemAtPath:symlinkPath];
-  [[self class] createSymbolicLinkAtPath:symlinkPath
-                     withDestinationPath:htmlPath];
 }
 
 - (BOOL)logCapturePostStream {
@@ -1002,6 +1007,14 @@ static NSString* gLoggingProcessName = nil;
       value = [[self class] snipSubtringOfString:value
                               betweenStartString:@"oauth_token=\""
                                        endString:@"\""];
+
+      // remove OAuth 2 bearer token (draft 16, and older form)
+      value = [[self class] snipSubtringOfString:value
+                              betweenStartString:@"Bearer "
+                                       endString:@"\n"];
+      value = [[self class] snipSubtringOfString:value
+                              betweenStartString:@"OAuth "
+                                       endString:@"\n"];
     }
     if (shouldAlignColons) {
       [str appendFormat:@"%*s: %@\n", maxKeyLen, [key UTF8String], value];
@@ -1010,6 +1023,63 @@ static NSString* gLoggingProcessName = nil;
     }
   }
   return str;
+}
+
++ (id)JSONObjectWithData:(NSData *)data {
+  Class serializer = NSClassFromString(@"NSJSONSerialization");
+  if (serializer) {
+    const NSUInteger kOpts = (1UL << 0); // NSJSONReadingMutableContainers
+    NSMutableDictionary *obj;
+    obj = [serializer JSONObjectWithData:data
+                                 options:kOpts
+                                   error:NULL];
+    return obj;
+  } else {
+    // try SBJsonParser or SBJSON
+    Class jsonParseClass = NSClassFromString(@"SBJsonParser");
+    if (!jsonParseClass) {
+      jsonParseClass = NSClassFromString(@"SBJSON");
+    }
+    if (jsonParseClass) {
+      GTMFetcherSBJSON *parser = [[[jsonParseClass alloc] init] autorelease];
+      NSString *jsonStr = [[[NSString alloc] initWithData:data
+                                                 encoding:NSUTF8StringEncoding] autorelease];
+      if (jsonStr) {
+        NSMutableDictionary *obj = [parser objectWithString:jsonStr error:NULL];
+        return obj;
+      }
+    }
+  }
+  return nil;
+}
+
++ (id)stringWithJSONObject:(id)obj {
+  Class serializer = NSClassFromString(@"NSJSONSerialization");
+  if (serializer) {
+    const NSUInteger kOpts = (1UL << 0); // NSJSONWritingPrettyPrinted
+    NSData *data;
+    data = [serializer dataWithJSONObject:obj
+                                  options:kOpts
+                                    error:NULL];
+    if (data) {
+      NSString *jsonStr = [[[NSString alloc] initWithData:data
+                                                 encoding:NSUTF8StringEncoding] autorelease];
+      return jsonStr;
+    }
+  } else {
+    // try SBJsonParser or SBJSON
+    Class jsonWriterClass = NSClassFromString(@"SBJsonWriter");
+    if (!jsonWriterClass) {
+      jsonWriterClass = NSClassFromString(@"SBJSON");
+    }
+    if (jsonWriterClass) {
+      GTMFetcherSBJSON *writer = [[[jsonWriterClass alloc] init] autorelease];
+      [writer setHumanReadable:YES];
+      NSString *jsonStr = [writer stringWithObject:obj error:NULL];
+      return jsonStr;
+    }
+  }
+  return nil;
 }
 
 @end
