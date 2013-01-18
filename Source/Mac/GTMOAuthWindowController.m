@@ -15,8 +15,6 @@
 
 #import <Foundation/Foundation.h>
 
-#if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH
-
 #if !TARGET_OS_IPHONE
 
 #ifdef GTL_TARGET_NAMESPACE
@@ -60,21 +58,6 @@ const char *kKeychainAccountName = "OAuth";
 
 - (id)initWithScope:(NSString *)scope
            language:(NSString *)language
-     appServiceName:(NSString *)keychainAppServiceName
-     resourceBundle:(NSBundle *)bundle {
-  // convenient entry point for Google authentication
-  return [self initWithScope:scope
-                    language:language
-             requestTokenURL:nil
-           authorizeTokenURL:nil
-              accessTokenURL:nil
-              authentication:nil
-              appServiceName:keychainAppServiceName
-              resourceBundle:bundle];
-}
-
-- (id)initWithScope:(NSString *)scope
-           language:(NSString *)language
     requestTokenURL:(NSURL *)requestURL
   authorizeTokenURL:(NSURL *)authorizeURL
      accessTokenURL:(NSURL *)accessURL
@@ -103,12 +86,7 @@ const char *kKeychainAccountName = "OAuth";
                                                webRequestSelector:@selector(signIn:displayRequest:)
                                                  finishedSelector:@selector(signIn:finishedWithAuth:error:)];
     } else {
-      // use default Google auth and endpoint values
-      signIn_ = [[GTMOAuthSignIn alloc] initWithGoogleAuthenticationForScope:scope
-                                                                      language:language
-                                                                      delegate:self
-                                                            webRequestSelector:@selector(signIn:displayRequest:)
-                                                              finishedSelector:@selector(signIn:finishedWithAuth:error:)];
+      NSAssert(0, @"authentication object required");
     }
 
     // the display name defaults to the bundle's name, falling back on the
@@ -369,12 +347,6 @@ const char *kKeychainAccountName = "OAuth";
   }
 }
 
-#pragma mark Token Revocation
-
-+ (void)revokeTokenForGoogleAuthentication:(GTMOAuthAuthentication *)auth {
-  [GTMOAuthSignIn revokeTokenForGoogleAuthentication:auth];
-}
-
 #pragma mark WebView methods
 
 - (NSURLRequest *)webView:(WebView *)sender resource:(id)identifier willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)redirectResponse fromDataSource:(WebDataSource *)dataSource {
@@ -530,25 +502,6 @@ decisionListener:(id<WebPolicyDecisionListener>)listener {
   }
 }
 
-+ (GTMOAuthAuthentication *)authForGoogleFromKeychainForName:(NSString *)appServiceName {
-  GTMOAuthAuthentication *newAuth = [GTMOAuthAuthentication authForInstalledApp];
-  [self authorizeFromKeychainForName:appServiceName
-                      authentication:newAuth];
-  return newAuth;
-}
-
-+ (GTMOAuthAuthentication *)authForGoogleFromKeychainForName:(NSString *)appServiceName
-                                                 consumerKey:(NSString *)consumerKey
-                                                  privateKey:(NSString *)privateKey {
-  GTMOAuthAuthentication *auth;
-  auth = [[[GTMOAuthAuthentication alloc] initWithSignatureMethod:kGTMOAuthSignatureMethodHMAC_SHA1
-                                                      consumerKey:consumerKey
-                                                       privateKey:privateKey] autorelease];
-  [GTMOAuthWindowController authorizeFromKeychainForName:appServiceName
-                                          authentication:auth];
-  return auth;
-}
-
 + (BOOL)authorizeFromKeychainForName:(NSString *)appServiceName
                       authentication:(GTMOAuthAuthentication *)newAuth {
   [newAuth setToken:nil];
@@ -628,5 +581,3 @@ decisionListener:(id<WebPolicyDecisionListener>)listener {
 @end
 
 #endif // #if !TARGET_OS_IPHONE
-
-#endif // #if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH

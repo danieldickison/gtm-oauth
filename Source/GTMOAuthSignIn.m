@@ -13,8 +13,6 @@
  * limitations under the License.
  */
 
-#if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH
-
 #define GTMOAUTHSIGNIN_DEFINE_GLOBALS 1
 #import "GTMOAuthSignIn.h"
 
@@ -31,14 +29,12 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
 - (void)invokeFinalCallbackWithError:(NSError *)error;
 
 - (void)startWebRequest;
-- (void)fetchGoogleUserInfo;
 
 - (GTMHTTPFetcher *)pendingFetcher;
 - (void)setPendingFetcher:(GTMHTTPFetcher *)obj fetchType:(NSString *)fetchType;
 
 - (void)accessFetcher:(GTMHTTPFetcher *)fetcher finishedWithData:(NSData *)data error:(NSError *)error;
 - (void)requestFetcher:(GTMHTTPFetcher *)fetcher finishedWithData:(NSData *)data error:(NSError *)error;
-- (void)infoFetcher:(GTMHTTPFetcher *)fetcher finishedWithData:(NSData *)data error:(NSError *)error;
 
 - (void)closeTheWindow;
 
@@ -58,44 +54,7 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
             requestTokenURL = requestURL_,
             authorizeTokenURL = authorizeURL_,
             accessTokenURL = accessURL_,
-            shouldFetchGoogleUserInfo = shouldFetchGoogleUserInfo_,
             networkLossTimeoutInterval = networkLossTimeoutInterval_;
-
-- (id)initWithGoogleAuthenticationForScope:(NSString *)scope
-                                  language:(NSString *)language
-                                  delegate:(id)delegate
-                        webRequestSelector:(SEL)webRequestSelector
-                          finishedSelector:(SEL)finishedSelector {
-  // standard Google OAuth endpoints
-  //
-  // http://code.google.com/apis/accounts/docs/OAuth_ref.html
-  NSURL *requestURL = [NSURL URLWithString:@"https://www.google.com/accounts/OAuthGetRequestToken"];
-  NSURL *authorizeURL = [NSURL URLWithString:@"https://www.google.com/accounts/OAuthAuthorizeToken"];
-  NSURL *accessURL = [NSURL URLWithString:@"https://www.google.com/accounts/OAuthGetAccessToken"];
-
-  GTMOAuthAuthentication *auth = [GTMOAuthAuthentication authForInstalledApp];
-  [auth setScope:scope];
-  [auth setLanguage:language];
-  [auth setServiceProvider:kGTMOAuthServiceProviderGoogle];
-
-  // open question: should we call [auth setHostedDomain: ] here too?
-
-  // we'll use the mobile user interface for embedded sign-in as it's smaller
-  // and somewhat more suitable for embedded usage
-  [auth setMobile:@"mobile"];
-
-  // we'll use a non-existent callback address, and close the window
-  // immediately when it's requested
-  [auth setCallback:@"http://www.google.com/OAuthCallback"];
-
-  return [self initWithAuthentication:auth
-                      requestTokenURL:requestURL
-                    authorizeTokenURL:authorizeURL
-                       accessTokenURL:accessURL
-                             delegate:delegate
-                   webRequestSelector:webRequestSelector
-                     finishedSelector:finishedSelector];
-}
 
 - (id)initWithAuthentication:(GTMOAuthAuthentication *)auth
              requestTokenURL:(NSURL *)requestURL
@@ -124,11 +83,6 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
     webRequestSelector_ = webRequestSelector;
     finishedSelector_ = finishedSelector;
 
-    // for Google authentication, we want to automatically fetch user info
-    if ([[authorizeURL host] isEqual:@"www.google.com"]) {
-      shouldFetchGoogleUserInfo_ = YES;
-    }
-
     // default timeout for a lost internet connection while the server
     // UI is displayed is 30 seconds
     networkLossTimeoutInterval_ = kDefaultNetworkLossTimeoutInterval;
@@ -139,13 +93,13 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
 - (void)dealloc {
   [self stopReachabilityCheck];
 
-  self.delegate = nil;
-  self.authentication = nil;
-  self.requestTokenURL = nil;
-  self.authorizeTokenURL = nil;
-  self.accessTokenURL = nil;
-  self.fetcherService = nil;
-  self.userData = nil;
+  [auth_ release];
+  [delegate_ release];
+  [requestURL_ release];
+  [authorizeURL_ release];
+  [accessURL_ release];
+  [fetcherService_ release];
+  [userData_ release];
 
   [super dealloc];
 }
@@ -190,16 +144,6 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
   // token
   [auth_ reset];
 
-  // add the Google-specific scope for obtaining the authenticated user info
-  if (shouldFetchGoogleUserInfo_) {
-    NSString *uiScope = @"https://www.googleapis.com/auth/userinfo#email";
-    NSString *scope = [auth_ scope];
-    if ([scope rangeOfString:uiScope].location == NSNotFound) {
-      scope = [scope stringByAppendingFormat:@" %@", uiScope];
-      [auth_ setScope:scope];
-    }
-  }
-
   // start fetching a request token
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestURL_];
   [auth_ addRequestTokenHeaderToRequest:request];
@@ -221,6 +165,13 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
     [self invokeFinalCallbackWithError:error];
   } else {
     [auth_ setKeysForResponseData:data];
+
+    // notify the app so it can hide any pre-sign in UI that was displayed
+    // during the request fetch
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc postNotificationName:kGTMOAuthUserWillSignIn
+                      object:self
+                    userInfo:nil];
 
     [self startWebRequest];
   }
@@ -301,6 +252,12 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
   // the callback page was requested, so tell the window to close
   [self closeTheWindow];
 
+  // notify the app so it can put up a post-sign in, pre-access token fetch UI
+  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+  [nc postNotificationName:kGTMOAuthUserHasSignedIn
+                    object:self
+                  userInfo:nil];
+
   // once the authorization finishes, try to get a validated access token
   NSString *responseStr = [[redirectedRequest URL] query];
   [auth_ setKeysForResponseString:responseStr];
@@ -329,45 +286,6 @@ static const NSTimeInterval kDefaultNetworkLossTimeoutInterval = 30.0;
     // we have an access token
     [auth_ setKeysForResponseData:data];
     [auth_ setHasAccessToken:YES];
-
-    if (shouldFetchGoogleUserInfo_
-        && [[auth_ serviceProvider] isEqual:kGTMOAuthServiceProviderGoogle]) {
-      // fetch the user's information from the Google server
-      [self fetchGoogleUserInfo];
-    } else {
-      // we're not authorizing with Google, so we're done
-      [self invokeFinalCallbackWithError:nil];
-    }
-  }
-}
-
-- (void)fetchGoogleUserInfo {
-  // fetch the additional user info
-  NSString *infoURLStr = @"https://www.googleapis.com/userinfo/email";
-  NSURL *infoURL = [NSURL URLWithString:infoURLStr];
-
-  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:infoURL];
-  [auth_ authorizeRequest:request];
-
-  GTMHTTPFetcher *fetcher = [self fetcherWithRequest:request];
-  fetcher.comment = @"user info";
-
-  [fetcher beginFetchWithDelegate:self
-                didFinishSelector:@selector(infoFetcher:finishedWithData:error:)];
-
-  [self setPendingFetcher:fetcher fetchType:kGTMOAuthFetchTypeUserInfo];
-}
-
-- (void)infoFetcher:(GTMHTTPFetcher *)fetcher finishedWithData:(NSData *)data error:(NSError *)error {
-  [self setPendingFetcher:nil fetchType:nil];
-
-  if (error) {
-    [self invokeFinalCallbackWithError:error];
-  } else {
-    // we have the authenticated user's info
-    if (data) {
-      [auth_ setKeysForResponseData:data];
-    }
 
     [self invokeFinalCallbackWithError:nil];
   }
@@ -513,31 +431,6 @@ static void ReachabilityCallBack(SCNetworkReachabilityRef target,
   }
 }
 
-#pragma mark Token Revocation
-
-+ (void)revokeTokenForGoogleAuthentication:(GTMOAuthAuthentication *)auth {
-  // we can revoke Google tokens with the old AuthSub API,
-  // http://code.google.com/apis/accounts/docs/AuthSub.html
-  if ([auth canAuthorize]
-      && [[auth serviceProvider] isEqual:kGTMOAuthServiceProviderGoogle]) {
-
-    NSURL *url = [NSURL URLWithString:@"https://www.google.com/accounts/accounts/AuthSubRevokeToken"];
-
-    // create a signed revocation request for this authentication object
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [auth addResourceTokenHeaderToRequest:request];
-
-    // remove the no-longer-usable token from the authentication object
-    [auth setHasAccessToken:NO];
-    [auth setToken:nil];
-
-    // we'll issue the request asynchronously, and there's nothing to be done if
-    // revocation succeeds or fails
-    [NSURLConnection connectionWithRequest:request
-                                  delegate:nil];
-  }
-}
-
 #pragma mark Accessors
 
 - (GTMHTTPFetcher *)pendingFetcher {
@@ -574,5 +467,3 @@ static void ReachabilityCallBack(SCNetworkReachabilityRef target,
 }
 
 @end
-
-#endif // #if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH

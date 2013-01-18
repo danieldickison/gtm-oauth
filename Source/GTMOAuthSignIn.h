@@ -41,8 +41,6 @@
 // when explicitly canceled by calling cancelSigningIn
 //
 
-#if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH
-
 #import <Foundation/Foundation.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 
@@ -74,8 +72,6 @@ enum {
 
   GTMHTTPFetcher *pendingFetcher_;
 
-  BOOL shouldFetchGoogleUserInfo_;
-
   SCNetworkReachabilityRef reachabilityRef_;
   NSTimer *networkLossTimer_;
   NSTimeInterval networkLossTimeoutInterval_;
@@ -92,8 +88,6 @@ enum {
 @property (nonatomic, retain, readonly) NSURL *authorizeTokenURL;
 @property (nonatomic, retain, readonly) NSURL *accessTokenURL;
 
-@property (nonatomic, assign) BOOL shouldFetchGoogleUserInfo;
-
 // Property for the optional fetcher service instance to be used to create
 // fetchers
 @property (nonatomic, retain) id <GTMHTTPFetcherServiceProtocol> fetcherService;
@@ -102,20 +96,7 @@ enum {
 // sign-in page is 30 seconds; set this to 0 to have no timeout
 @property (nonatomic, assign) NSTimeInterval networkLossTimeoutInterval;
 
-// Convenience entry point for accessing Google APIs; this creates the
-// authentication object, and uses standard URL endpoints for OAuth to
-// Google services
-//
-// The delegate is retained until sign-in has completed or been canceled
-- (id)initWithGoogleAuthenticationForScope:(NSString *)scope
-                                  language:(NSString *)language
-                                  delegate:(id)delegate
-                        webRequestSelector:(SEL)webRequestSelector
-                          finishedSelector:(SEL)finishedSelector;
-
-// Entry point for accessing non-Google APIs
-//
-// designated initializer
+// Designated initializer
 - (id)initWithAuthentication:(GTMOAuthAuthentication *)auth
              requestTokenURL:(NSURL *)requestURL
            authorizeTokenURL:(NSURL *)authorizeURL
@@ -144,9 +125,4 @@ enum {
 // delegate's finishedSelector
 - (void)windowWasClosed;
 
-// Revocation of an authorized token from Google
-+ (void)revokeTokenForGoogleAuthentication:(GTMOAuthAuthentication *)auth;
-
 @end
-
-#endif // #if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH

@@ -13,8 +13,6 @@
  * limitations under the License.
  */
 
-#if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH
-
 // HMAC digest
 #import <CommonCrypto/CommonHMAC.h>
 
@@ -687,7 +685,16 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
 }
 
 - (void)stopAuthorization {
- // nothing to do, since OAuth 1 authorization is synchronous
+  // nothing to do, since OAuth 1 authorization is synchronous
+}
+
+- (void)stopAuthorizationForRequest:(NSURLRequest *)request {
+  // nothing to do, since OAuth 1 authorization is synchronous
+}
+
+- (BOOL)isAuthorizingRequest:(NSURLRequest *)request {
+  // OAuth 1 auth is synchronous, so authorizations are never pending
+  return NO;
 }
 
 - (BOOL)isAuthorizedRequest:(NSURLRequest *)request {
@@ -1244,5 +1251,3 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
 }
 
 @end
-
-#endif // #if !GTL_REQUIRE_SERVICE_INCLUDES || GTL_INCLUDE_OAUTH
