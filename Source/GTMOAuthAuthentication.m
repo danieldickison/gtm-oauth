@@ -638,17 +638,12 @@ static NSString *const kUserEmailIsVerifiedKey    = @"isVerified";
 
 // general entry point for GTL library
 - (BOOL)authorizeRequest:(NSMutableURLRequest *)request {
-  NSString *token = [self token];
-  if ([token length] == 0) {
-    return NO;
+  if ([self shouldUseParamsToAuthorize]) {
+    [self addResourceTokenParamsToRequest:request];
   } else {
-    if ([self shouldUseParamsToAuthorize]) {
-      [self addResourceTokenParamsToRequest:request];
-    } else {
-      [self addResourceTokenHeaderToRequest:request];
-    }
-    return YES;
+    [self addResourceTokenHeaderToRequest:request];
   }
+  return YES;
 }
 
 - (BOOL)canAuthorize {
